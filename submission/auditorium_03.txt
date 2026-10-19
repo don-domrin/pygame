@@ -1,0 +1,334 @@
+# === settings.py ===
+"""Настройки Арены."""
+CELL = 40
+MAP_ROWS = [
+    "###############",
+    "#.......#.....#",
+    "#.#####.#.###.#",
+    "#.#...........#",
+    "#.#.###.#####.#",
+    "#...#.......#.#",
+    "#.###.#####.#.#",
+    "#.............#",
+    "###############",
+]
+MAP_W = len(MAP_ROWS[0])
+MAP_H = len(MAP_ROWS)
+WORLD_W = MAP_W * CELL
+WORLD_H = MAP_H * CELL
+PLAYER_HP = 30
+PLAYER_SPEED = 160.0
+PLAYER_RADIUS = 14
+SHOOT_COOLDOWN = 0.35
+RESPAWN_TIME = 1.5
+BULLET_SPEED = 420.0
+BULLET_RADIUS = 5
+BULLET_DAMAGE = 10
+WIN_SCORE = 3
+SPAWNS = [(1, 1), (13, 7)]
+COLORS = [(70, 130, 240), (235, 75, 75)]
+NAMES = ["Синий", "Красный"]
+
+# === entities.py ===
+"""Бойцы и пули Арены."""
+import settings as s
+
+
+class Entity:
+    """Объект с координатами и радиусом."""
+
+    def __init__(self, x: float, y: float, radius: float):
+        self.x = float(x)
+        self.y = float(y)
+        self.radius = float(radius)
+        self.alive = True
+
+    @property
+    def cell(self) -> tuple[int, int]:
+        """Клетка объекта на поле."""
+        return int(self.x // s.CELL), int(self.y // s.CELL)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(x={self.x:g}, y={self.y:g})"
+
+    def distance_to(self, other: "Entity") -> float:
+        """Расстояние между центрами."""
+        return ((self.x - other.x) ** 2 + (self.y - other.y) ** 2) ** 0.5
+
+    def overlaps(self, other: "Entity") -> bool:
+        """Проверяет пересечение объектов."""
+        return self.distance_to(other) < self.radius + other.radius
+
+
+class Player(Entity):
+    """Боец Арены."""
+
+    def __init__(self, pid: int, name: str):
+        cell_x, cell_y = s.SPAWNS[pid]
+        super().__init__(cell_x * s.CELL + s.CELL / 2,
+                         cell_y * s.CELL + s.CELL / 2, s.PLAYER_RADIUS)
+        self.pid = pid
+        self.name = name
+        self.hp = s.PLAYER_HP
+        self.score = 0
+        self.dir_x, self.dir_y = 1.0, 0.0
+        self.cooldown = 0.0
+        self.respawn_timer = 0.0
+        self.input = {"dx": 0.0, "dy": 0.0, "shoot": False}
+
+    def respawn(self) -> None:
+        """Возвращает бойца на старт."""
+        cell_x, cell_y = s.SPAWNS[self.pid]
+        self.x = cell_x * s.CELL + s.CELL / 2
+        self.y = cell_y * s.CELL + s.CELL / 2
+        self.hp = s.PLAYER_HP
+        self.alive = True
+        self.cooldown = 0.0
+        self.respawn_timer = 0.0
+
+    def take_damage(self, amount: int) -> bool:
+        """Отнимает HP и сообщает, погиб ли боец."""
+        if not self.alive:
+            return False
+        self.hp = max(0, self.hp - amount)
+        if self.hp == 0:
+            self.alive = False
+            self.respawn_timer = s.RESPAWN_TIME
+            return True
+        return False
+
+    def to_dict(self) -> dict:
+        """Снимок бойца для клиента."""
+        return {"id": self.pid, "name": self.name,
+                "x": round(self.x, 1), "y": round(self.y, 1),
+                "dx": self.dir_x, "dy": self.dir_y,
+                "hp": self.hp, "score": self.score, "alive": self.alive}
+
+
+class Bullet(Entity):
+    """Пуля, летящая по прямой."""
+
+    def __init__(self, x: float, y: float, dir_x: float, dir_y: float, owner_id: int):
+        super().__init__(x, y, s.BULLET_RADIUS)
+        self.vx = dir_x * s.BULLET_SPEED
+        self.vy = dir_y * s.BULLET_SPEED
+        self.owner_id = owner_id
+
+    def to_dict(self) -> dict:
+        """Координаты пули для клиента."""
+        return {"x": round(self.x, 1), "y": round(self.y, 1)}
+
+# === game.py ===
+"""Игровое ядро Арены."""
+import settings as s
+from entities import Bullet, Player
+
+
+class Game:
+    """Правила и состояние матча."""
+
+    def __init__(self, player_names: list[str] | None = None):
+        names = player_names or s.NAMES
+        self.field = [list(row) for row in s.MAP_ROWS]
+        self.players = [Player(i, names[i]) for i in range(len(s.SPAWNS))]
+        self.bullets: list[Bullet] = []
+        self.time = 0.0
+        self.over = False
+        self.winner_id: int | None = None
+
+    def is_wall(self, cell_x: int, cell_y: int) -> bool:
+        """Проверяет клетку карты."""
+        if not (0 <= cell_y < s.MAP_H and 0 <= cell_x < s.MAP_W):
+            return True
+        return self.field[cell_y][cell_x] == "#"
+
+    def hits_wall(self, x: float, y: float, radius: float) -> bool:
+        """Проверяет четыре угла квадрата вокруг объекта."""
+        for corner_x in (x - radius, x + radius):
+            for corner_y in (y - radius, y + radius):
+                if self.is_wall(int(corner_x // s.CELL), int(corner_y // s.CELL)):
+                    return True
+        return False
+
+    def apply_input(self, pid: int, data: dict) -> None:
+        """Принимает направление движения и выстрел."""
+        player = self.players[pid]
+        player.input = {"dx": float(data.get("dx", 0.0)),
+                        "dy": float(data.get("dy", 0.0)),
+                        "shoot": bool(data.get("shoot", False))}
+
+    def update(self, dt: float) -> None:
+        """Продвигает мир на dt секунд."""
+        if self.over:
+            return
+        self.time += dt
+        for player in self.players:
+            self._update_player(player, dt)
+        for bullet in list(self.bullets):
+            self._update_bullet(bullet, dt)
+        self.bullets = [bullet for bullet in self.bullets if bullet.alive]
+
+    def _update_player(self, player: Player, dt: float) -> None:
+        """Двигает бойца и выпускает пулю."""
+        if not player.alive:
+            player.respawn_timer -= dt
+            if player.respawn_timer <= 0:
+                player.respawn()
+            return
+        player.cooldown = max(0.0, player.cooldown - dt)
+        dx, dy = player.input["dx"], player.input["dy"]
+        length = (dx * dx + dy * dy) ** 0.5
+        if length > 0:
+            dx, dy = dx / length, dy / length
+            player.dir_x, player.dir_y = dx, dy
+            step = s.PLAYER_SPEED * dt
+            if not self.hits_wall(player.x + dx * step, player.y, player.radius):
+                player.x += dx * step
+            if not self.hits_wall(player.x, player.y + dy * step, player.radius):
+                player.y += dy * step
+        if player.input["shoot"] and player.cooldown == 0:
+            self.bullets.append(Bullet(player.x, player.y,
+                                       player.dir_x, player.dir_y, player.pid))
+            player.cooldown = s.SHOOT_COOLDOWN
+
+    def _update_bullet(self, bullet: Bullet, dt: float) -> None:
+        """Двигает пулю небольшими шагами до столкновения."""
+        steps = max(1, int((abs(bullet.vx) + abs(bullet.vy)) * dt / 8) + 1)
+        for _ in range(steps):
+            bullet.x += bullet.vx * dt / steps
+            bullet.y += bullet.vy * dt / steps
+            if self.hits_wall(bullet.x, bullet.y, bullet.radius):
+                bullet.alive = False
+                return
+            for player in self.players:
+                if player.alive and player.pid != bullet.owner_id and player.overlaps(bullet):
+                    bullet.alive = False
+                    if player.take_damage(s.BULLET_DAMAGE):
+                        self._score_point(bullet.owner_id)
+                    return
+
+    def _score_point(self, pid: int) -> None:
+        """Начисляет очко за гибель соперника."""
+        player = self.players[pid]
+        player.score += 1
+        if player.score >= s.WIN_SCORE:
+            self.over = True
+            self.winner_id = pid
+
+    def state(self) -> dict:
+        """Снимок мира для консоли или сети."""
+        return {"t": round(self.time, 2),
+                "players": [player.to_dict() for player in self.players],
+                "bullets": [bullet.to_dict() for bullet in self.bullets],
+                "over": self.over, "winner": self.winner_id}
+
+# === storage.py ===
+"""Таблица матчей Арены."""
+import json
+import os
+
+RECORDS_FILE = "records.json"
+
+
+def load_records(path: str = RECORDS_FILE) -> list[dict]:
+    """Читает записи, не прерывая игру при ошибке файла."""
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        print(f"Файл {path} повреждён, начинаем таблицу заново.")
+        return []
+    except OSError as error:
+        print(f"Не удалось прочитать {path}: {error}")
+        return []
+    if not isinstance(data, list):
+        return []
+    return data
+
+
+def save_match(winner: str, score: str, turns: int, path: str = RECORDS_FILE) -> None:
+    """Добавляет матч в таблицу."""
+    records = load_records(path)
+    records.append({"winner": winner, "score": score, "turns": turns})
+    try:
+        with open(path, "w", encoding="utf-8") as file:
+            json.dump(records, file, ensure_ascii=False, indent=2)
+    except OSError as error:
+        print(f"Не удалось сохранить {path}: {error}")
+
+
+def print_table(path: str = RECORDS_FILE) -> None:
+    """Печатает десять последних матчей."""
+    print("\n--- Таблица матчей ---")
+    for number, record in enumerate(load_records(path)[-10:], start=1):
+        print(f'{number:>2}. {record["winner"]:<10} {record["score"]:<6} ходов: {record["turns"]}')
+
+# === main.py ===
+"""Консольная оболочка Арены."""
+import settings as s
+from game import Game
+import storage
+
+TURN_DT = s.CELL / s.PLAYER_SPEED
+KEYS = {"w": (0, -1), "s": (0, 1), "a": (-1, 0), "d": (1, 0)}
+SYMBOLS = ["A", "B"]
+
+
+def draw(state: dict) -> None:
+    """Рисует полученный от ядра снимок."""
+    picture = [list(row) for row in s.MAP_ROWS]
+    for bullet in state["bullets"]:
+        x = int(bullet["x"] // s.CELL)
+        y = int(bullet["y"] // s.CELL)
+        if 0 <= x < s.MAP_W and 0 <= y < s.MAP_H:
+            picture[y][x] = "*"
+    for player in state["players"]:
+        if player["alive"]:
+            x = int(player["x"] // s.CELL)
+            y = int(player["y"] // s.CELL)
+            picture[y][x] = SYMBOLS[player["id"]]
+    print()
+    for row in picture:
+        print(" ".join(row))
+    for player in state["players"]:
+        symbol = SYMBOLS[player["id"]]
+        print(f'{symbol} {player["name"]:<8} HP {player["hp"]:>3}  очки: {player["score"]}')
+
+
+def main() -> None:
+    """Запускает матч на одной клавиатуре."""
+    game = Game()
+    turns = 0
+    while not game.over:
+        draw(game.state())
+        current = game.players[turns % 2]
+        if not current.alive:
+            waiting = max(1, round(current.respawn_timer / TURN_DT))
+            print(f"\n{current.name} погиб и возрождается. Осталось ходов: {waiting}")
+            game.update(TURN_DT)
+            turns += 1
+            continue
+        command = input(f"\nХод: {current.name} > ").strip().lower()
+        if command == "q":
+            print("Матч прерван.")
+            return
+        if command in KEYS:
+            dx, dy = KEYS[command]
+            game.apply_input(current.pid, {"dx": dx, "dy": dy})
+        elif command == "f":
+            game.apply_input(current.pid, {"shoot": True})
+        game.update(TURN_DT)
+        game.apply_input(current.pid, {})
+        turns += 1
+    draw(game.state())
+    winner = game.players[game.winner_id]
+    score = f"{game.players[0].score}:{game.players[1].score}"
+    print(f"Победил {winner.name}! Счёт {score}, ходов: {turns}")
+    storage.save_match(winner.name, score, turns)
+    storage.print_table()
+
+
+if __name__ == "__main__":
+    main()

@@ -76,6 +76,7 @@ class Game:
 
     def _update_player(self, player: Player, dt: float) -> None:
         """Двигает старателя со скольжением вдоль стен."""
+        speed = player.speed
         player.boost = max(0.0, player.boost - dt)
         dx, dy = player.input["dx"], player.input["dy"]
         length = (dx * dx + dy * dy) ** 0.5
@@ -83,7 +84,7 @@ class Game:
             return
         dx, dy = dx / length, dy / length
         player.dir_x, player.dir_y = dx, dy
-        step = player.speed * dt
+        step = speed * dt
         if not self.hits_wall(player.x + dx * step, player.y, player.radius):
             player.x += dx * step
         if not self.hits_wall(player.x, player.y + dy * step, player.radius):

@@ -40,7 +40,10 @@ def parse_command(command: str) -> tuple[str, int]:
         count_text = command
     if count_text and not count_text.isdigit():
         return "?", 0
-    count = int(count_text) if count_text else 1
+    try:
+        count = int(count_text) if count_text else 1
+    except ValueError:
+        return "?", 0
     return key, count
 
 
@@ -62,12 +65,11 @@ def main() -> None:
         for _ in range(repeat):
             if game.over:
                 break
-            current = game.players[turns % 2]
             dx, dy = KEYS.get(key, (0, 0))
             game.apply_input(current.pid, {"dx": dx, "dy": dy})
             game.update(TURN_DT)
             game.apply_input(current.pid, {})
-            turns += 1
+        turns += 1
     draw(game.state())
     score = f"{game.players[0].score}:{game.players[1].score}"
     winner = "Ничья" if game.winner_id is None else game.players[game.winner_id].name

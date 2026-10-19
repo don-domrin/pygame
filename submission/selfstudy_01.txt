@@ -28,7 +28,11 @@ def ask_chest(attempt, forbidden=None):
         if not answer.isdigit():
             print("Введите число.")
             continue
-        number = int(answer)
+        try:
+            number = int(answer)
+        except ValueError:
+            print("Введите число.")
+            continue
         if number < 1 or number > CHESTS:
             print(f"Введите число от 1 до {CHESTS}.")
         elif number == forbidden:
